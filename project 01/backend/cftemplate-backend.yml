@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: ---
+Metadata: 
+
+Parameters:
+  ApplicationNameParam:
+    Type: String
+    Default: 'defaultappname'
+    Description: 'Name of an application'
+  DeploymentBucketArn:
+    Type: String
+    Default: ''
+    Description: 'ARN of a S3 Bucket where the lambda function is deployed'
+  FunctionPackagePath:
+    Type: String
+    Default: ''
+    Description: 'Path to lambda function package file'
+  LambdaFunctionCode:
+    Type: String
+    Default: ''
+    Description: 'If deployment bucket for lambda function is not specified, code for lambda function (note: bucket will be then created!)'
+  LambaFunctionEnv:
+    Type: String
+    Default: ''
+    Description: 'Runtime enviroment for lambda function'
+  LambaFunctionHandler:
+    Type: String
+    Default: 'handler'
+    Description: 'Handler function name'
+
+Mappings: 
+
+Conditions:
+  DeploymentBucketNotExists: !Equals
+    - !Ref DeploymentBucketArn
+    - ''
+
+Resources: 
+  DBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: 'id'
+          AttributeType: 'N'
+        - AttributeName: 'role'
+          AttributeType: 'S'
+        - AttributeName: 'content'
+          AttributeType: 'S'
+        - AttributeName: 'data'
+          AttributeType: 'S'
+        - AttributeName: 'href'
+          AttributeType: 'S'
+        - AttributeName: 'included'
+          AttributeType: 'N'
+        - AttributeName: 'index'
+          AttributeType: 'N'
+        - AttributeName: 'item_role'
+          AttributeType: 'S'
+        - AttributeName: 'name'
+          AttributeType: 'S'
+        - AttributeName: 'page_role'
+          AttributeType: 'S'
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName: !Join
+      - '-'
+      - -  !Ref ApplicationNameParam
+        -  'table'
+      KeySchema:
+        - AttributeName: 'id'
+          KeyType: HASH
+  ServerlessDeploymentBucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: PublicRead
+  GetPageDataLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 365
+      LogGroupName: !Join
+      - '-'
+      - -  !Ref ApplicationNameParam
+        -  'logs'
+  GetPagedataFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: !Ref LambaFunctionHandler
+      PackageType: 'Zip'
+      Runtime: !Ref LambaFunctionEnv
+      Code: !If
+      - DeploymentBucketNotExists
+      - S3Bucket: !Ref ServerlessDeploymentBucket
+        S3Key: !Ref FunctionPackagePath 
+      - ZipFile: !Join
+        - ''
+        - -  '|'
+          -  !Ref LambdaFunctionCode     
+      Role: !GetAtt GetPagedataFunctionExecutionRole.Arn
+    DependsOn: GetPageDataLogGroup
+  GetPageDataFunctionVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref GetPagedataFunction 
+  GetPageDataFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lamda.invokeFunction'
+      FunctionName: !GetAtt GetPagedataFunction.Arn
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Join
+      - ' '
+      - -  'arn:'
+        -  !Ref 'AWS:Partition'
+        -  ':execute-api:'
+        -  !Ref 'AWS:Region'
+        -  ':'
+        -  !Ref 'AWS:AccountId'
+        -  ':'
+        -  !Ref FunctionsHttpApi
+        -  /*/*
+  GetPagedataFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ''
+          PolicyDocument:
+           Version: '2012-10-17'
+           Statement:
+              - Effect: "Allow"
+                Action:
+                  - 'dynamodb:DescribeTable'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:GetItem'
+                Resource: !GetAtt DBTable.Arn
+
+  FunctionsHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Join
+      - '-'
+      - -  !Ref ApplicationNameParam
+        -  'api'
+      ProtocolType: HTTP
+  FunctionsHttpApiDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    Properties:
+      ApiId: !Ref FunctionsHttpApi
+      DependsOn: FunctionsHttpApiRoute
+  FunctionsHttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FunctionsHttpApi
+      RouteKey: 'GET /pages'
+      Target: !Join
+      - '/'
+      - -  'integrations'
+        -  !Ref FunctionsHttpApiIntegration
+  FunctionsHttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FunctionsHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !GetAtt GetPagedataFunction.Arn
+      PayloadFormatVersion: '2.0'
+  FunctionsHttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref FunctionsHttpApi
+      StageName: 'Prod'
+      DeploymentId: !Ref FunctionsHttpApiDeployment
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+Outputs:
